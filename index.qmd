@@ -2,6 +2,7 @@
 title: "Lab 6: Is extreme rainfall at Hobby changing?"
 week: 6
 module: 2
+author: "Jingyi Chen"
 date: 2026-10-02
 due:
   - label: "Lab 6 results to present in class"
@@ -170,231 +171,326 @@ Explain why you made each choice, as well as what it was.
    1. If Bayesian: how did you choose priors?
    1. If bootstrap: how did you choose how to resample?
 
-## Examples
+## My analysis
 
-This is a relatively open-ended lab, particularly compared to your other labs.
-Two worked examples on synthetic (simulated) data give you all the code you need.
-You may **delete this section from your final notebook.**
+*I fit GEV models to the annual maximum daily rainfall at Hobby and compare a stationary model with nonstationary models that change with CO2. Each decision is stated with its reason as it comes up, and the four key questions are answered under Results.*
 
-### GEV Example
-
-The first example is a GEV with a quadratic trend in the location and the log scale.
-A quadratic trend is usually a bad idea, but it shows how to use the software.
-
-$$
-y_t \sim \text{GEV}\left(\alpha_0 + \alpha_1 x_t + \alpha_2 x_t^2, \; \exp(\beta_0 + \beta_1 x_t + \beta_2 x_t^2), \; \xi\right).
-$$
-
-For simplicity, the covariate is the year centered on 1985, $x_t = t - 1985$.
-The synthetic dataset has one annual maximum for each year from 1946 to 2025.
-In 1985 its location rises by 0.5 mm per year and its scale grows by 0.4% per year, and both rates speed up slowly over time.
-
-```{julia}
-#| solution: false
-#| output: false
-years = collect(1946:2025)
-x = years .- 1985
-μ_true = 90 .+ 0.5 .* x .- 0.05 .* x .^ 2
-σ_true = 35 .* exp.(-0.005 .* x .+ 0.0005 .* x .^ 2)
-y_syn = rand.(rng, GeneralizedExtremeValue.(μ_true, σ_true, 0.15))
-```
-
-The `gevfitbayes` function from the `CEVE543Utils` package fits a GEV whose location and log scale are each a linear combination of the covariates you pass.
-Passing $x_t$ and $x_t^2$ as two covariates gives the quadratic above:
-
-```{julia}
-#| solution: false
-gev_syn = gevfitbayes(y_syn; locationcov=[x, x .^ 2], logscalecov=[x, x .^ 2], rng=rng, progress=false)
-DataFrame(summarystats(gev_syn.estimate))
-```
-
-where
-
-- `locationcov` is a list of covariates for the location parameter (`[x, x .^ 2]` is a list holding two covariates)
-- `logscalecov` is a list of covariates for the log-scale parameter
-- `rng` specifies the random number generator
-- `progress` specifies whether to show a progress bar.
-
-By default, priors in `gevfitbayes` are flat on every coefficient and uniform between $-0.5$ and $0.5$ on $\xi$.
-The posterior is sampled with an implementation of DE-MCzs, the sampler in the RMC-BestFit software that @smith_brays:2026 use, although you can change this by passing in `sampler=NUTS()` to use the NUTS sampler.
-
-The `summarystats` table is for checking the chains.
-Check the `rhat` column, which should be close to 1, and the `ess_bulk` column, which should be in the hundreds or more, as in lab 5.
-DE-MCzs takes no gradient steps, so it has no divergences to count.
-The coefficients in that table are on the standardized scale the fit works on internally.
-
-To read the coefficients in the units of the covariate, use `params`.
-It gives one row per posterior draw for each parameter.
-The first column is the intercept, which is the value at the means of the covariates rather than at $x_t = 0$.
-The second column is $\alpha_1$, the slope per year in 1985, and the third is $\alpha_2$.
-
-```{julia}
-#| solution: false
-coefs = params(gev_syn)
-α1 = coefs.β_location[:, 2]
-@printf("α1: median %.2f mm per year [%.2f, %.2f]; the true value is 0.5\n",
-    median(α1), quantile(α1, 0.025), quantile(α1, 0.975))
-```
-
-The key results are return levels in particular years.
-`returnlevel` computes them at any covariate value you pass, giving one row per posterior draw and one column per value.
-Here the values are the years you want minus 1985, and their squares.
-
-```{julia}
-#| solution: false
-report_years = [1986, 2026, 2066]
-x_report = report_years .- 1985
-rl10 = returnlevel(gev_syn, 10; locationcov=[x_report, x_report .^ 2], logscalecov=[x_report, x_report .^ 2])
-rl100 = returnlevel(gev_syn, 100; locationcov=[x_report, x_report .^ 2], logscalecov=[x_report, x_report .^ 2])
-
-show_interval(label, v) = @printf("%-32s median %4.0f mm [%4.0f, %4.0f]\n", label, median(v), quantile(v, 0.025), quantile(v, 0.975))
-for (T, rl) in ((10, rl10), (100, rl100))
-    show_interval("$T-year level in 2026", rl[:, 2])
-    show_interval("$T-year change, 1986 to 2026", rl[:, 2] .- rl[:, 1])
-    show_interval("$T-year change, 2026 to 2066", rl[:, 3] .- rl[:, 2])
-end
-```
-
-The projection to 2066 assumes the quadratic keeps going for another 40 years, past the end of the data.
-With log CO2 or GMST as the covariate, you would need a value for that covariate in 2066, which is an assumption about the future that you have to state and defend.
-
-@fig-syn-trend plots the fitted 2- and 100-year levels in each year of the record next to the true levels the synthetic data came from.
-
-```{julia}
-#| solution: false
-#| label: fig-syn-trend
-#| fig-cap: "The 2- and 100-year levels through time from the GEV fit to the synthetic record (posterior median), the true levels, and the synthetic annual maxima."
-fig = Figure(; size=(700, 350))
-ax = Axis(fig[1, 1]; xlabel=L"\text{year}", ylabel=L"\text{daily rainfall (mm)}")
-
-for (k, T) in enumerate([2, 100])
-    rl_fit = returnlevel(gev_syn, T)
-    rl_true = returnlevel.(GeneralizedExtremeValue.(μ_true, σ_true, 0.15), T)
-    lines!(ax, years, median.(eachcol(rl_fit)); color=colors[k], linewidth=2, label="$T-year level, fitted")
-    lines!(ax, years, rl_true; color=colors[k], linestyle=:dash, label="$T-year level, true")
-end
-
-scatter!(ax, years, y_syn; color=:black, markersize=5, label="synthetic annual maxima")
-axislegend(ax; position=:lt)
-fig
-```
-
-If you don't want to use a Bayesian approach, you can instead fit by maximum likelihood and use bootstrapping or another approach to characterize your uncertainty.
-`gevfit` fits the same model by maximum likelihood, and `getdistribution` gives the fitted GEV for each year.
-A parametric bootstrap draws a new record from those distributions, refits it, and records its return levels, many times over.
-The spread of the refitted levels is the uncertainty.
-
-```{julia}
-#| solution: false
-gev_mle = gevfit(y_syn; locationcov=[x, x .^ 2], logscalecov=[x, x .^ 2])
-gev_by_year = getdistribution(gev_mle)
-
-n_boot = 500
-rl10_boot = zeros(n_boot, length(report_years))
-rl100_boot = zeros(n_boot, length(report_years))
-for b in 1:n_boot
-    y_boot = rand.(rng, gev_by_year)
-    fit_boot = gevfit(y_boot; locationcov=[x, x .^ 2], logscalecov=[x, x .^ 2])
-    rl10_boot[b, :] = returnlevel(fit_boot, 10; locationcov=[x_report, x_report .^ 2], logscalecov=[x_report, x_report .^ 2])
-    rl100_boot[b, :] = returnlevel(fit_boot, 100; locationcov=[x_report, x_report .^ 2], logscalecov=[x_report, x_report .^ 2])
-end
-
-for (T, rl) in ((10, rl10_boot), (100, rl100_boot))
-    show_interval("$T-year level in 2026", rl[:, 2])
-    show_interval("$T-year change, 1986 to 2026", rl[:, 2] .- rl[:, 1])
-    show_interval("$T-year change, 2026 to 2066", rl[:, 3] .- rl[:, 2])
-end
-```
-
-### Other functional forms
-
-The functional form is which parameters change with the covariate, and how.
-Every fitting function also takes a table and the names of its columns.
-For example, `gevfitbayes(annmax, :y; locationcovid=[:log_CO2], logscalecovid=[:log_CO2])` fits the column `y` of `annmax` with the location and the log scale each a line in `log_CO2`.
-With this table form, each functional form is a choice of covariate columns:
-
-- A trend in the location alone passes `locationcovid` and leaves out `logscalecovid`.
-- A trend in the scale alone does the opposite.
-- A curved trend adds a column holding the covariate squared to your table, such as `annmax.log_CO2_sq = annmax.log_CO2 .^ 2`, and names it in `locationcovid`.
-  A quadratic will find some curvature in almost any record, including one drawn from a straight line.
-  Outside the data it grows without limit, so its 2066 level rests on curvature the record barely constrains.
-- An abrupt change at a year you choose adds a column that is 0 before that year and 1 after it.
-  Say why that year, and whether you chose it before or after looking at the data.
-
-### Prior information
-
-Two keywords change the priors.
-`trend_priors` puts a prior on the slopes, one for each parameter, and any you leave out stay flat.
-The slope priors are on the standardized scale of the `summarystats` table, so each is a change per standard deviation of the covariate.
-A `location` slope is in millimeters, so `trend_priors=(location=Normal(0, 5),)` says the location probably moves less than about 10 mm per standard deviation.
-A `logscale` slope is a proportional change in the scale, so `logscale=Normal(0, 0.1)` says the scale probably changes by less than about 20% per standard deviation.
-`quantile_priors` states what you believe about return levels, as in lab 4.
-Each belief names an observation, a return period, and a distribution for that return level in the year of the observation, and you can give as many as you like.
-
-```{julia}
-#| solution: false
-beliefs = [
-    (index=1, period=100, belief=Normal(250, 40)),
-    (index=lastindex(y_syn), period=100, belief=Normal(450, 40)),
-]
-gev_beliefs = gevfitbayes(y_syn; locationcov=[x, x .^ 2], logscalecov=[x, x .^ 2], quantile_priors=beliefs, rng=rng, progress=false)
-rl100_beliefs = returnlevel(gev_beliefs, 100; locationcov=[[2026 - 1985], [(2026 - 1985)^2]], logscalecov=[[2026 - 1985], [(2026 - 1985)^2]])
-@printf("2026 100-year level: median %.0f mm without beliefs, %.0f mm with them\n", median(rl100[:, 2]), median(rl100_beliefs))
-```
-
-### GPD Example
-
-The second example is a GPD with a trend in the log scale, using the same centered year as the covariate.
-The synthetic storm record has 12 storms a year above a threshold of 25.4 mm, and the scale of each storm's excess grows by 0.4% per year.
-
-```{julia}
-#| solution: false
-#| output: false
-x_storm = repeat(x; inner=12)
-peaks_syn = 25.4 .+ rand.(rng, GeneralizedPareto.(0, 20 .* exp.(0.004 .* x_storm), 0.15))
-```
-
-`gpfitbayes` takes the peaks and the threshold $u$, and fits a GPD to the excesses with the log scale a straight line in the covariate, where $x_i$ is the year of storm $i$ minus 1985:
-
-$$
-y_i - u \sim \text{GPD}\left(\exp(\beta_0 + \beta_1 x_i), \; \xi\right).
-$$
-
-```{julia}
-#| solution: false
-gp_syn = gpfitbayes(peaks_syn, 25.4; logscalecov=[x_storm], rng=rng, progress=false)
-DataFrame(summarystats(gp_syn.estimate))
-```
-
-A GPD return level also needs `rate`, the average number of storms per year above the threshold, which is 12 here.
-A GPD has no location parameter to trend, so you pass only `logscalecov`.
-`gpfit` and `gpfitbayes` treat `rate` as one known number.
-They do not allow a trend in how often storms exceed the threshold, and their return-level intervals leave out the uncertainty in it.
-If you want to model either, write the model in Turing directly.
-
-```{julia}
-#| solution: false
-rl10_gp = returnlevel(gp_syn, 10; rate=12, logscalecov=[x_report])
-rl100_gp = returnlevel(gp_syn, 100; rate=12, logscalecov=[x_report])
-for (T, rl) in ((10, rl10_gp), (100, rl100_gp))
-    show_interval("$T-year level in 2026", rl[:, 2])
-    show_interval("$T-year change, 1986 to 2026", rl[:, 2] .- rl[:, 1])
-end
-```
-
-With 960 storms in place of 80 annual maxima, the intervals are narrower.
-
-## Your Hobby analysis
-
-Now use the code in the examples to answer the key questions above.
-If you fit a GEV, this cell makes a table of annual maxima joined to the covariates:
+### Data
 
 ```{julia}
 #| solution: false
 #| output: false
 annmax = combine(groupby(daily, :year), :prcp_mm => maximum => :y)
 annmax = sort(innerjoin(annmax, covariates; on=:year), :year)
+
+# Print a table without the column types, row numbers, or size line
+showtable(df) = show(df; eltypes=false, summary=false, show_row_number=false)
+
+# "median [2.5%, 97.5%]" of a vector of draws
+function fmt(v; digits=0)
+    f = Printf.Format("%.$(digits)f [%.$(digits)f, %.$(digits)f]")
+    return Printf.format(f, median(v), quantile(v, 0.025), quantile(v, 0.975))
+end
 ```
+
+```{julia}
+#| solution: false
+@printf("%d complete years, %d to %d\n", nrow(annmax), minimum(annmax.year), maximum(annmax.year))
+println(filter(r -> 200 <= r.n_days < 350, days_per_year))
+```
+
+**Decision: GEV on annual maxima**
+*One value per year needs no threshold or declustering rule, and 80 complete years is enough to fit a few parameters.*
+
+**Decision: keep years with at least 350 valid days.**
+*I assume the data are missing at random. Before 1947, every year except 1940 and 1941 has under 60% of its days, so its maximum could be too low, and 2026 is not over. The only year near the cutoff is 1990 (334 days), so the exact cutoff barely matters.*
+
+### Stationary or not, and which covariate
+
+```{julia}
+#| solution: false
+candidates = [
+    (name="M0 stationary", loc=Symbol[], sc=Symbol[]),
+    (name="M1 μ ~ log CO2", loc=[:log_CO2], sc=Symbol[]),
+    (name="M2 μ, log σ ~ log CO2", loc=[:log_CO2], sc=[:log_CO2]),
+    (name="M3 μ, log σ ~ GMST", loc=[:gmst], sc=[:gmst]),
+    (name="M4 μ ~ Niño 3.4", loc=[:nino34], sc=Symbol[]),
+]
+mle_fits = [gevfit(annmax, :y; locationcovid=c.loc, logscalecovid=c.sc) for c in candidates]
+ll0 = loglike(mle_fits[1])
+showtable(DataFrame(map(zip(candidates, mle_fits)) do (c, f)
+    k = 3 + length(c.loc) + length(c.sc)
+    lr = 2 * (loglike(f) - ll0)
+    (model=c.name, AIC=round(2k - 2loglike(f); digits=1),
+        p_vs_M0=k == 3 ? "" : @sprintf("%.2f", ccdf(Chisq(k - 3), lr)),
+        ξ=round(params(f).β_shape[1]; digits=2))
+end))
+```
+
+```{julia}
+#| solution: false
+@printf("correlation of log CO2 and GMST: %.2f\n", cor(annmax.log_CO2, annmax.gmst))
+```
+
+**Decision: fit a trend model, but report its range rather than claim a trend.**
+*No long-term covariate beats the stationary model: the CO2 and GMST models have p-values of 0.22 to 0.45 and a higher AIC than M0. That does not mean nothing changed, only that 80 years cannot show it clearly. I still fit a trend because the question is how much the 100-year level changed, and a stationary model answers zero by assumption.*
+
+**Decision: log CO2 as the covariate.**
+*It is a physical driver, and its future can be written as a scenario. GMST fits about the same, since it is almost the same signal (correlation 0.96). Niño 3.4 is the only significant covariate (p = 0.02), but it has no long-term trend and cannot be known for 2066, so it does not help with the questions.*
+
+**Decision: location and log scale both linear in log CO2 (M2).**
+*A location-only trend (M1) raises every return level by the same amount.Letting the scale change too allows the 100-year level to rise faster than a typical year, which is what Fagnant's claim is about.*
+*The choice matters. M1 gives a 40-year change of +6 mm in the 100-year level and M2 gives +99 mm (@fig-forest).*
+
+```{julia}
+#| solution: false
+early = filter(r -> r.year <= 1985, annmax)
+recent = filter(r -> r.year >= 1986, annmax)
+shift_mm = 1.93 * (mean(recent.year) - mean(early.year))
+
+# Permutation test: how often does a random split of the same values give a gap this big?
+perm_rng = MersenneTwister(2026)
+function perm_test(a, b, stat; n_perm=20_000)
+    observed = stat(b) - stat(a)
+    pooled = vcat(a, b)
+    n = length(a)
+    hits = count(1:n_perm) do _
+        p = shuffle(perm_rng, pooled)
+        abs(stat(p[(n + 1):end]) - stat(p[1:n])) >= abs(observed)
+    end
+    return observed, hits / n_perm
+end
+for (name, stat) in (("median", median), ("mean", mean))
+    gap, pval = perm_test(early.y, recent.y, stat)
+    @printf("recent minus early, %-7s %+4.0f mm (permutation p = %.2f)\n", name * ":", gap, pval)
+end
+@printf("uniform shift at Fagnant's rate: %.0f mm\n", shift_mm)
+```
+
+```{julia}
+#| solution: false
+#| label: fig-halves
+#| fig-cap: "Annual maxima of 1940-1985 (blue) and 1986-2025 (orange), each sorted and plotted at its return period within that half. The dashed line is the early half raised by 79 mm, where the recent half would sit if the whole distribution had shifted at Fagnant's rate."
+plot_pos(n) = 1 ./ (1 .- (1:n) ./ (n + 1))   # Weibull plotting positions
+fig = Figure(; size=(750, 420))
+ax = Axis(fig[1, 1]; xscale=log10, xlabel="return period within each half (years)", ylabel="annual maximum (mm)",
+    xticks=([1, 2, 5, 10, 20, 40], ["1", "2", "5", "10", "20", "40"]))
+lines!(ax, plot_pos(nrow(early)), sort(early.y) .+ shift_mm; color=:gray50, linestyle=:dash, linewidth=2,
+    label=@sprintf("1940-1985 + %.0f mm", shift_mm))
+scatterlines!(ax, plot_pos(nrow(early)), sort(early.y); color=colors[1], markersize=7, label="1940-1985")
+scatterlines!(ax, plot_pos(nrow(recent)), sort(recent.y); color=colors[2], markersize=7, label="1986-2025")
+text!(ax, plot_pos(nrow(recent))[end], maximum(recent.y); text="Harvey", align=(:right, :bottom), offset=(-6, 2), fontsize=12)
+axislegend(ax; position=:lt, framevisible=false)
+fig
+```
+
+*@fig-halves compares the two halves of the record directly from the data, without fitting a GEV. The recent 40 years are a little wetter (median +21 mm), but random splits of the same data give a gap this large 13% of the time, so this could be chance. If Fagnant's rise came from shifting the whole distribution (location only), the recent half would sit 79 mm higher, on the dashed line. It does not, so a location-only change of this magnitude is not supported by the observed data. If the 100-year level did rise that much, most of the rise must come from a wider tail (scale), which is why M2 lets the scale change too.*
+
+### Fitting the models
+
+**Decision: Bayesian fits with flat priors on the trend.**
+I keep the package defaults (flat priors on the coefficients, ξ uniform on -0.5 to 0.5) so the data set the trend, rather than an assumption about how fast extremes should grow.
+As a check, I refit M2 with a prior based on Clausius-Clapeyron scaling. About 7% more moisture per °C of warming, converted to log CO2 through the observed GMST-CO2 relationship, with the prior standard deviation at twice that rate.
+I also refit M2 without 2017 to see how much Harvey drives the result.
+
+```{julia}
+#| solution: false
+#| output: false
+fit_m0 = gevfitbayes(annmax, :y; rng=rng, progress=false)
+fit_m1 = gevfitbayes(annmax, :y; locationcovid=[:log_CO2], rng=rng, progress=false)
+fit_m2 = gevfitbayes(annmax, :y; locationcovid=[:log_CO2], logscalecovid=[:log_CO2], rng=rng, progress=false)
+
+# Prior scaled by Clausius-Clapeyron (about 7% more moisture per °C of warming):
+# convert to a change per unit of log CO2 with the observed GMST-log CO2 slope,
+# and set the prior sd to twice that rate, centered on no trend.
+cc = 0.07
+gmst_per_logco2 = cov(annmax.gmst, annmax.log_CO2) / var(annmax.log_CO2)
+sd_x = std(annmax.log_CO2)   # the package works per sd of the covariate
+μ_ref = params(mle_fits[1]).β_location[1]
+cc_prior = (location=Normal(0, 2cc * gmst_per_logco2 * μ_ref * sd_x),
+    logscale=Normal(0, 2cc * gmst_per_logco2 * sd_x))
+fit_m2cc = gevfitbayes(annmax, :y; locationcovid=[:log_CO2], logscalecovid=[:log_CO2],
+    trend_priors=cc_prior, rng=rng, progress=false)
+
+# Same as M2 without 2017 (Harvey), to see how much one storm matters
+fit_m2_noharvey = gevfitbayes(filter(r -> r.year != 2017, annmax), :y;
+    locationcovid=[:log_CO2], logscalecovid=[:log_CO2], rng=rng, progress=false)
+```
+
+```{julia}
+#| solution: false
+fits = [("M0", fit_m0), ("M1", fit_m1), ("M2", fit_m2), ("M2, CC prior", fit_m2cc), ("M2, no Harvey", fit_m2_noharvey)]
+showtable(DataFrame(map(fits) do (name, f)
+    st = DataFrame(summarystats(f.estimate))
+    (model=name, max_rhat=round(maximum(st.rhat); digits=3), min_ess=round(Int, minimum(st.ess_bulk)),
+        ξ=fmt(params(f).β_shape[:, 1]; digits=2))
+end))
+```
+
+All chains converged (rhat at most 1.004, effective sample size above 1,200).
+The shape ξ is about 0.15 to 0.20, a heavy upper tail, and it stays well inside its -0.5 to 0.5 prior, so that prior does not constrain it.
+
+### Results
+
+CO2 for 2026 and 2066 is extended from the 2015-2025 growth rate, because the covariate file ends in 2025.
+
+```{julia}
+#| solution: false
+ppm = exp.(covariates.log_CO2)
+co2_rate = (ppm[end] - ppm[end-10]) / 10   # ppm per year, 2015 to 2025
+log_co2_obs(yr) = covariates.log_CO2[findfirst(==(yr), covariates.year)]
+co2_path(yr, r) = yr <= 2025 ? log_co2_obs(yr) : log(ppm[end] + co2_rate + r * (yr - 2026))
+
+key_years = [1986, 2026, 2066]
+x_key = co2_path.(key_years, co2_rate)
+@printf("CO2: %.0f ppm in 1986, %.0f in 2026, %.0f in 2066 (+%.1f ppm per year)\n", exp.(x_key)..., co2_rate)
+
+# Return-level draws (rows) at log CO2 values xs (columns)
+function rl_draws(fit, T, xs; trend=true)
+    trend || return repeat(returnlevel(fit, T), 1, length(xs))
+    return returnlevel(fit, T; locationcov=[xs], logscalecov=[xs])
+end
+function rl_draws_m1(fit, T, xs)
+    return returnlevel(fit, T; locationcov=[xs])
+end
+```
+
+```{julia}
+#| solution: false
+answer_models = [
+    ("M2 (main)", T -> rl_draws(fit_m2, T, x_key)),
+    ("M2, CC prior", T -> rl_draws(fit_m2cc, T, x_key)),
+    ("M1", T -> rl_draws_m1(fit_m1, T, x_key)),
+    ("M0 stationary", T -> rl_draws(fit_m0, T, x_key; trend=false)),
+]
+showtable(DataFrame(vec([begin
+    r = g(T)
+    (model=name, T=T, level_2026=fmt(r[:, 2]),
+        change_1986_2026=fmt(r[:, 2] .- r[:, 1]), change_2026_2066=fmt(r[:, 3] .- r[:, 2]))
+end for (name, g) in answer_models, T in (10, 100)])))
+```
+
+```{julia}
+#| solution: false
+r100 = rl_draws(fit_m2, 100, x_key)
+@printf("M2: chance the 100-year level rose since 1986 = %.2f; chance it rose at least 77 mm = %.2f\n",
+    mean(r100[:, 2] .> r100[:, 1]), mean(r100[:, 2] .- r100[:, 1] .>= 77))
+r100h = rl_draws(fit_m2_noharvey, 100, x_key)
+@printf("M2 without Harvey: 100-year change since 1986 = %s mm\n", fmt(r100h[:, 2] .- r100h[:, 1]))
+```
+
+**Q1. 2026 return levels.**
+*From M2, the 2026 10-year daily rainfall is 235 mm and the 100-year is 429 mm (@fig-rl-time).*
+
+**Q2. Uncertainty.**
+*The 95% intervals are 175 to 333 mm and 285 to 742 mm.*
+*The 100-year interval is wide because the tail is heavy and 80 years say little about a 1-in-100 event.*
+*The model choice matters as much: the CC prior gives 199 and 360 mm, and the stationary model 191 and 353 mm.*
+*The intervals leave out errors at the gauge and the chance that the CO2 relationship is wrong.*
+
+**Q3. Change over the past 40 years.**
+*M2 says the 100-year level rose 99 mm since 1986 (-25 to +311), about 2.5 mm per year.*
+*That is close to Fagnant's 1.93 mm per year but much less certain, and the chance it rose at all is 0.93.*
+*The 10-year level rose 49 mm (-9 to +132).*
+*The answer depends on the model (@fig-forest): a location-only trend gives +6 mm, the CC prior +15 mm, and dropping Harvey alone cuts the M2 change to +67 mm. So the data are consistent with both no change and Fagnant's estimate.*
+
+**Q4. Change over the next 40 years.**
+*I assume CO2 keeps rising at the 2015-2025 rate, from 430 ppm in 2026 to 535 ppm in 2066, and that the fitted relationship holds beyond the CO2 levels in the record.*
+*Under M2, the 100-year level rises another 137 mm (-23 to +617) and the 10-year level 63 mm (-8 to +250).*
+*The upper end of that range is very wide because it extends a scale trend that the data barely constrain.*
+*The CC prior gives a much smaller +17 mm (-37 to +104), but it holds only if extreme rainfall follows Clausius-Clapeyron scaling, which this record cannot confirm, so I keep the flat-prior result as the main answer.*
+*If CO2 stops rising, the levels stop changing (@fig-projection).*
+
+```{julia}
+#| solution: false
+#| label: fig-rl-time
+#| fig-cap: "10-year (blue) and 100-year (orange) daily rainfall from M2, 1940 to 2026: posterior median (line) and 95% interval (shading), with the 2026 values marked. Dashed lines are the stationary model M0. Black points are the observed annual maxima of the kept years."
+grid_years = collect(minimum(annmax.year):2026)
+x_grid = co2_path.(grid_years, co2_rate)
+fig = Figure(; size=(800, 420))
+ax = Axis(fig[1, 1]; xlabel="year", ylabel="daily rainfall (mm)")
+for (k, T) in enumerate([10, 100])
+    r = rl_draws(fit_m2, T, x_grid)
+    band!(ax, grid_years, quantile.(eachcol(r), 0.025), quantile.(eachcol(r), 0.975); color=(colors[k], 0.25))
+    lines!(ax, grid_years, median.(eachcol(r)); color=colors[k], linewidth=2.5, label="$T-year, M2")
+    hlines!(ax, [median(returnlevel(fit_m0, T))]; color=colors[k], linestyle=:dash, linewidth=1.5, label="$T-year, M0")
+    r26 = r[:, end]
+    rangebars!(ax, [2026], [quantile(r26, 0.025)], [quantile(r26, 0.975)]; color=colors[k], linewidth=2, whiskerwidth=8)
+    text!(ax, 2026, median(r26); text=@sprintf("%.0f", median(r26)), align=(:left, :center), offset=(8, 0), fontsize=12)
+end
+scatter!(ax, annmax.year, annmax.y; color=:black, markersize=5, label="annual maximum")
+xlims!(ax, 1937, 2033)
+axislegend(ax; position=:lt, framevisible=false, labelsize=11)
+fig
+```
+
+```{julia}
+#| solution: false
+#| label: fig-forest
+#| fig-cap: "Change in the 100-year daily rainfall from 1986 to 2026 under each model: posterior median, 50% (thick) and 95% (thin) intervals. The shaded orange band is Fagnant et al.'s 1.93 mm/yr (1.50 to 2.35) over 40 years."
+forest = [
+    ("M0 stationary", rl_draws(fit_m0, 100, x_key; trend=false)),
+    ("M1 μ ~ log CO2", rl_draws_m1(fit_m1, 100, x_key)),
+    ("M2 (main)", rl_draws(fit_m2, 100, x_key)),
+    ("M2, CC prior", rl_draws(fit_m2cc, 100, x_key)),
+    ("M2, without Harvey", rl_draws(fit_m2_noharvey, 100, x_key)),
+]
+fig = Figure(; size=(750, 320))
+n = length(forest)
+ax = Axis(fig[1, 1]; xlabel="change in 100-year level, 1986 to 2026 (mm)", yticks=(1:n, first.(forest)), yreversed=true)
+vspan!(ax, 40 * 1.50, 40 * 2.35; color=(colors[2], 0.25))
+vlines!(ax, [0]; color=:gray40)
+for (i, (_, r)) in enumerate(forest)
+    v = r[:, 2] .- r[:, 1]
+    rangebars!(ax, [i], [quantile(v, 0.025)], [quantile(v, 0.975)]; direction=:x, color=colors[1], linewidth=1.5)
+    rangebars!(ax, [i], [quantile(v, 0.25)], [quantile(v, 0.75)]; direction=:x, color=colors[1], linewidth=5)
+    scatter!(ax, [median(v)], [i]; color=:black, markersize=9)
+end
+fig
+```
+
+```{julia}
+#| solution: false
+#| label: fig-projection
+#| fig-cap: "100-year daily rainfall to 2066 under three CO2 paths: CO2 stops rising after 2026 (blue), the 2015-2025 growth continues (orange), and growth speeds up by half (green). Left: M2 with flat priors. Right: M2 with the CC prior. Lines are posterior medians and shading 95% intervals."
+scenarios = [0.0, co2_rate, 1.5co2_rate]
+hist_years = collect(minimum(annmax.year):2025)
+fut_years = collect(2025:2066)
+fig = Figure(; size=(850, 380))
+proj_axes = Axis[]
+for (j, (title, f)) in enumerate((("M2, flat priors", fit_m2), ("M2, CC prior", fit_m2cc)))
+    ax = Axis(fig[1, j]; title=title, xlabel="year", ylabel=j == 1 ? "100-year daily rainfall (mm)" : "")
+    push!(proj_axes, ax)
+    r = rl_draws(f, 100, co2_path.(hist_years, co2_rate))
+    band!(ax, hist_years, quantile.(eachcol(r), 0.025), quantile.(eachcol(r), 0.975); color=(:gray50, 0.25))
+    lines!(ax, hist_years, median.(eachcol(r)); color=:black, linewidth=2)
+    for (k, rate) in enumerate(scenarios)
+        r = rl_draws(f, 100, co2_path.(fut_years, rate))
+        band!(ax, fut_years, quantile.(eachcol(r), 0.025), quantile.(eachcol(r), 0.975); color=(colors[k], 0.15))
+        lines!(ax, fut_years, median.(eachcol(r)); color=colors[k], linewidth=2.5)
+    end
+end
+linkyaxes!(proj_axes...)
+fig
+```
+
+**Bottom line.**
+**Best estimate in 2026:**
+
+*$𝑧_10$ (2026)=235[175,333], $𝑧_100$ (2026)=429[285,742]  mm/day*
+
+**Uncertainty:** *Large. The 100-year interval spans 285–742 mm. Across the models, posterior median estimates of the 40-year change range from +6 to +99 mm. Under the main M2 model, the 95% credible interval is [-25, 311] mm.*
+
+**Past 40 years:** *the main model suggests an increase, especially in the upper tail, but the 95% credible interval for the change includes zero.*
+
+**Next 40 years:** *under continued CO2 growth, return levels likely rise further; this is a projection under assumptions instead of a guaranteed forecast.*
+
+*Hence, Hobby rainfall extremes may be increasing, but one gauge alone cannot pin down the 100-year tail with high confidence.*
+
+
+
+
+
 
 ## Turning it in
 
